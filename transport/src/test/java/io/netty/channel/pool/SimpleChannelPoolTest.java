@@ -27,6 +27,8 @@ import io.netty.channel.local.LocalEventLoopGroup;
 import io.netty.channel.local.LocalServerChannel;
 import org.junit.Test;
 
+import java.util.concurrent.LinkedBlockingQueue;
+
 import static org.junit.Assert.*;
 
 public class SimpleChannelPoolTest {
@@ -83,6 +85,56 @@ public class SimpleChannelPoolTest {
         sc.close().sync();
         channel2.close().sync();
         channel3.close().sync();
+        group.shutdownGracefully();
+    }
+
+    @Test
+    public void testBoundedChannelPoolSegment() throws Exception {
+        EventLoopGroup group = new LocalEventLoopGroup();
+        LocalAddress addr = new LocalAddress(LOCAL_ADDR_ID);
+        Bootstrap cb = new Bootstrap();
+        ServerBootstrap sb = new ServerBootstrap();
+
+        cb.group(group)
+          .channel(LocalChannel.class);
+
+        sb.group(group)
+          .channel(LocalServerChannel.class)
+          .childHandler(new ChannelInitializer<LocalChannel>() {
+              @Override
+              public void initChannel(LocalChannel ch) throws Exception {
+                  ch.pipeline().addLast(new ChannelInboundHandlerAdapter());
+              }
+          });
+
+        // Start server
+        Channel sc = sb.bind(addr).sync().channel();
+        CountingChannelPoolHandler handler = new CountingChannelPoolHandler();
+
+        ChannelPool<Channel, ChannelPoolKey> pool = new SimpleChannelPool<Channel, ChannelPoolKey>(cb, handler,
+                ActiveChannelHealthChecker.instance(), new ChannelPoolSegmentFactory<Channel>() {
+                    @Override
+                    public ChannelPoolSegment<Channel> newSegment() {
+                        // Bounded queue with a maximal capacity of 1
+                        return ChannelPoolSegmentFactories.newFifoSegment(new LinkedBlockingQueue<Channel>(1));
+                    }
+                });
+
+        ChannelPoolKey key = new DefaultChannelPoolKey(addr);
+
+        Channel channel = pool.acquire(key).sync().getNow();
+        Channel channel2 = pool.acquire(key).sync().getNow();
+
+        assertTrue(pool.release(channel).syncUninterruptibly().getNow());
+        assertFalse(pool.release(channel2).syncUninterruptibly().getNow());
+        channel2.close().sync();
+
+        assertEquals(2, handler.channelCount());
+        assertEquals(0, handler.acquiredCount());
+        assertEquals(1, handler.releasedCount());
+        sc.close().sync();
+        channel.close().sync();
+        channel2.close().sync();
         group.shutdownGracefully();
     }
 }
