@@ -154,7 +154,7 @@ public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey>
                 timeoutTask = new TimeoutTask() {
                     @Override
                     public void onTimeout(AcquireTask task) {
-                        // Fail teh promise as we timed out.
+                        // Fail the promise as we timed out.
                         task.promise.setFailure(TIMEOUT_EXCEPTION);
                     }
                 };
@@ -216,15 +216,16 @@ public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey>
             if (pendingAcquireCount >= maxPendingAcquires) {
                 promise.setFailure(FULL_EXCEPTION);
             } else {
-                ++pendingAcquireCount;
-                final ScheduledFuture<?> timeoutFuture;
-                if (timeoutTask != null) {
-                    timeoutFuture = executor.schedule(timeoutTask, acquireTimeoutNanos, TimeUnit.NANOSECONDS);
-                } else {
-                    timeoutFuture = null;
-                }
+                AcquireTask task = new AcquireTask(key, promise);
+                if (pendingAcquireQueue.offer(task)) {
+                    ++pendingAcquireCount;
 
-                pendingAcquireQueue.offer(new AcquireTask(key, promise, timeoutFuture));
+                    if (timeoutTask != null) {
+                        task.timeoutFuture = executor.schedule(timeoutTask, acquireTimeoutNanos, TimeUnit.NANOSECONDS);
+                    }
+                } else {
+                    promise.setFailure(FULL_EXCEPTION);
+                }
             }
 
             assert pendingAcquireCount > 0;
@@ -297,23 +298,23 @@ public final class FixedChannelPool<C extends Channel, K extends ChannelPoolKey>
         final K key;
         final Promise<C> promise;
         final long creationTime = System.nanoTime();
-        final ScheduledFuture<?> timeoutFuture;
+        ScheduledFuture<?> timeoutFuture;
 
-        public AcquireTask(final K key, Promise<C> promise, ScheduledFuture<?> timeoutFuture) {
+        public AcquireTask(final K key, Promise<C> promise) {
             super(promise);
             this.key = key;
             // We need to create a new promise as we need to ensure the AcquireListener runs in the correct
             // EventLoop.
             this.promise = executor.<C>newPromise().addListener(this);
-            this.timeoutFuture = timeoutFuture;
         }
     }
 
     private abstract class TimeoutTask implements Runnable {
         @Override
         public final void run() {
-            long expiredThresholdTime = System.nanoTime() - acquireTimeoutNanos;
             assert executor.inEventLoop();
+
+            long expiredThresholdTime = System.nanoTime() - acquireTimeoutNanos;
             for (;;) {
                 AcquireTask task = pendingAcquireQueue.peek();
                 if (task == null || task.creationTime >= expiredThresholdTime) {
